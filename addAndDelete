@@ -1,0 +1,188 @@
+
+        /*
+* system-test|script import desc|pwd|555|System Administrator|script import desc
+system-test|script import desc|pwd|5044|Personalabteilung|script import desc
+install-test|script import dess|pwd|5043|Personalabteilung|script import desc
+* 
+* 
+*/
+
+
+        public override void Process()
+        {
+            var importedline = Line.Split('|');
+            var username = importedline[0];
+            var userdesc = importedline[1];
+            var password = importedline[2];
+            var persnr = importedline[3];
+            var rolename = importedline[4];
+            var roledesc = importedline[5];
+			var role_add_del = importedline[6];
+			
+
+            var user = CreateOrUseUser(username, userdesc, password);
+            var role = CreateOrUseRole(rolename, roledesc);
+			if(role_add_del=="D")
+				deleteUserRole(user,role);
+            else	
+				CreateUserRoleAssignments(user, role);
+            LinkPersonToUser(user, persnr);
+            Api.Transaction.Publish();
+
+        }
+
+        /// <summary>
+        /// 	Creates an user if it doesn't exists else uses an existant one
+        /// </summary>
+        private UserTO CreateOrUseUser(string username, string description, string password)
+        {
+            var user = Api.Transaction.Data.Users.Indices.Name(username) ?? Api.Transaction.Data.Users.New(RootNode);
+            var isnewobj = user.Name == "";
+
+            user.Name = username;
+            user.Description = description;
+            user.CreationType = "StandardAuthenticationProvider";
+            user.uspasswordprofile = 1;
+            user.PasswordProfileDOR = Api.Transaction.Data.PasswordProfiles.Indices.Primary(user.uspasswordprofile);
+            user.uslock = false;
+            user.usesstemplate = false;
+            user.uslastlogin = DataObject.MinDate;
+
+            if (isnewobj)
+            {
+                user.usnr = Interflex.IF6040.Foundation.Services.DataEngine.NumberGenerator.UniqueNumberPoolManager.GetIntNumber(
+                    UserMetaInfo.TypeId, UserMetaInfo.PN.usnr);
+            }
+
+            Api.Transaction.Data.Users.Store(user);
+            Api.Transaction.Publish();
+
+            SetPassword(username, password);
+
+            if (isnewobj)
+                CreateUserReportprofile(user, 1);
+
+
+            return user;
+        }
+
+
+        private void CreateUserReportprofile(UserTO user, int reportProfileId)
+        {
+            var repProf = Api.Transaction.Data.IF_reportprofiles.Indices.Primary(reportProfileId) ?? Api.Transaction.Data.IF_reportprofiles.New();
+            var userRepProf = Api.Transaction.Data.UserReportprofiles.Indices.Primary(user) ?? Api.Transaction.Data.UserReportprofiles.New();
+            userRepProf.UserDOR = user;
+            userRepProf.ReportprofileDOR = repProf;
+            Api.Transaction.Store(userRepProf);
+        }
+
+
+        private void SetPassword(string username, string password)
+        {
+            LoginInterface.GetCurrent().ChangePassword(Scope, username, password);
+        }
+
+        /// <summary>
+        /// 	Creates a role if it doesn't exists else uses an existant one
+        /// </summary>
+        private RoleTO CreateOrUseRole(string rolename, string description)
+        {
+            var roles = Api.Transaction.Data.Roles.Indices.Name(rolename);
+
+            if (roles.Count == 1)
+            {
+                //     AddToSystemFolder(roles[0]);
+                return roles[0];
+            }
+
+
+            // create role "System Administrator"
+            var role = Api.Transaction.Data.Roles.New(RootNode);
+            role.Name = rolename;
+            role.Description = description;
+            Api.Transaction.Store(role);
+
+            // get all execution rights
+            var allExecutionRights = Api.Transaction.Data.ExecutionRights.Select(Condition.All);
+            foreach (var exright in allExecutionRights)
+            {           // add all execution rights with full permission
+
+                var executionRightValue = Api.Transaction.Data.ExecutionRightValues.New();
+                executionRightValue.Role = role;
+                executionRightValue.ExecutionRight = exright;
+                executionRightValue.Value = Foundation.Services.Security.Global.ExecutionRightValueEnum.YesPerm;
+                Api.Transaction.Store(executionRightValue);
+            }
+
+            return role;
+        }
+
+        /// <summary>
+        /// 	Associate user to his role if not already done
+        /// </summary>
+        private void CreateUserRoleAssignments(UserTO user, RoleTO role)
+        {
+            var aura = Api.Transaction.Data.UserRoleAssignments.New();
+
+            aura.User = user;
+            aura.Role = role;
+            aura.FromDate = Foundation.Libraries.Types.IfDate.MinValue;
+            aura.ToDate = Foundation.Libraries.Types.IfDate.MaxValue;
+            Api.Transaction.Store(aura);
+        }
+		private void deleteUserRole(UserTO user, RoleTO role)
+		{
+			var roleassignment = Api.Transaction.Data.UserRoleAssignments.Select(
+                                        BOP.UserRoleAssignment.User == user
+                                        && BOP.UserRoleAssignment.Role ==role)
+                                        .FirstOrDefault();
+			if (roleassignment != null)
+			{
+				Api.Transaction.Delete(roleassignment);
+				Api.Transaction.Publish();
+				Logfile.Info("RoleDeleted " + user + " " + role);
+				Logfile.Error("RoleDeleted " + user + " " + role);
+			}
+			else
+			{
+				Logfile.Info("Role Not Found to user " + user + " " + role);
+				Logfile.Error("Role Found to user  " + user + " " + role);
+			
+			}
+		}
+
+        /// <summary>
+        /// 	Associate the user to an existing person
+        /// </summary>
+        private void LinkPersonToUser(UserTO user, string persNr)
+        {
+            var emp = Api.Transaction.Data.Employees.Indices.stpersnr(persNr);
+            if (emp != null)
+            {
+                Api.Transaction.Store(user);
+
+                // link employee record to plato-user record
+                var employeeUser = Api.Transaction.Data.Employee_Users.Indices.User(user) ?? Api.Transaction.Data.Employee_Users.New();
+                employeeUser.Employee = emp;
+                employeeUser.User = user;
+                Api.Transaction.Store(employeeUser);
+            }
+            else
+                Logfile.Error("Employee not found stpersnr:" + persNr);
+        }
+
+
+        BaseOrgTreeElementTO RootNode
+        {
+            get
+            {
+                if (_rootNode == null)
+                {
+                    var guid = Api.Session.Transaction.OrganizationTree.GetRoots()[0].Child.RelatedObject.Guid;
+                    _rootNode = Api.Session.Transaction.Data.BaseOrgTreeElements[guid];
+                }
+                return _rootNode;
+            }
+        }
+        BaseOrgTreeElementTO _rootNode;
+
